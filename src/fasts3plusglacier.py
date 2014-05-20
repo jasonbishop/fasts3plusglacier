@@ -385,20 +385,21 @@ def computesha256hashtree(file):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Research Computing Glacier backups', fromfile_prefix_chars="@")
+    parser = argparse.ArgumentParser(description='Research Computing S3/Glacier backups', fromfile_prefix_chars="@")
     parser.add_argument('directories', help='dirs to scan', action='append', nargs='*')
-    parser.add_argument('--restore', help='restore these directories from glacier', default=False, action='store_true')
-    parser.add_argument('--backup', help='backup files to glacier', default=False, action='store_true')
+    parser.add_argument('--restore', help='restore given directory from Glacier', default=False, action='store_true')
+    parser.add_argument('--backup', help='backup files in listed directories to S3/Glacier', default=False, action='store_true')
     parser.add_argument('--show-bucket-policy', help='show bucket policy for moving files to glacier', default=False, action='store_true')
     parser.add_argument('--check-sha256', help='when comparing, use sha hash instead of mtime', default=False, action='store_true')
+    parser.add_argument('--bucketname', help='which bucket to use', required=True, action='store')
+    parser.add_argument('--verbose', help='verbose output', default=False, action='store_true')
     args = parser.parse_args()
     print (args)
 
     conn = boto.connect_s3(host=s3endpoint, is_secure=True)
 
-    bucket_name = 'superdooperpooperuploadtesting'
+    bucket_name = args.bucketname
     bucket = conn.get_bucket(bucket_name)
-    print 'bucket name', bucket_name
 
     try:
         current = bucket.get_lifecycle_config()
@@ -487,8 +488,7 @@ if __name__ == "__main__":
                                     os.makedirs('glacierrestore' + os.sep + os.path.dirname(amazonfiles[i]['name'].replace('largefile' + dirtorestore,'')))
 
                                 if not os.path.exists('glacierrestore' + os.sep + amazonfiles[i]['name'].replace('largefile' + dirtorestore,'')):
-                                    print 'not exists','glacierrestore' + os.sep + amazonfiles[i]['name'].replace('largefile' + dirtorestore,'')
-                                    print 'restoring'
+                                    print 'glacierrestore' + os.sep + amazonfiles[i]['name'].replace('largefile' + dirtorestore,''),'does not exist, restoring',
                                     amazonfiles[i]['key'].get_contents_to_filename('glacierrestore' + os.sep + amazonfiles[i]['name'].replace('largefile' + dirtorestore,''))
                                     print 'setting atime/mtime'
                                     os.utime('glacierrestore' + os.sep + amazonfiles[i]['name'].replace('largefile' + dirtorestore,''), (float(awsobjectlookup.get(i, 'atime')), float(awsobjectlookup.get(i, 'mtime'))))
@@ -570,7 +570,8 @@ if __name__ == "__main__":
                                 bigfilesqueue.put(i)
                                 bigfile_upload_count += 1
                             else:
-                                print 'compare only, not uploading'
+                                if args.verbose:
+                                    print i.realpath(),'compare only, not uploading'
                     else:
                         if amazonfiles.has_key('smallfile' + i.realpath()):
                             print i.realpath()
@@ -601,7 +602,8 @@ if __name__ == "__main__":
                                 smallfilesqueue.put(i)
                                 smallfile_upload_count += 1
                             else:
-                                print 'compare only, not uploading'
+                                if args.verbose:
+                                    print i.realpath(),'compare only, not uploading'
                 elif i.isdir():
                     dir_count += 1
                 else:
@@ -642,12 +644,12 @@ if __name__ == "__main__":
             smallfileworkers = [ ]
             for q in smallfilesqueues:
                 print 'kicking off 2 workers for file queue'
-                for i in range(2):
+                for i in range(20):
                     w = managesmallfiles(i, q, bucket_name)
                     smallfileworkers.append(w)
                     w.start()
 
-                for i in range(2):
+                for i in range(20):
                     q.put(None)
 
             print ''
