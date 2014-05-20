@@ -234,7 +234,7 @@ class managebigfiles(multiprocessing.Process):
 
                 f = io.open(file, mode='rb', buffering=4*1024*1024)
                 workers = [ ]
-                for i in range(32):
+                for i in range(4):
                     w = Largefileblockworker(i, bucket_name, f, mp.key_name, mp.id, self.chunkqueue, self.needmorequeue, self.timewasted, self.result, hashes)
                     w.setDaemon(1)
                     workers.append(w)
@@ -246,7 +246,7 @@ class managebigfiles(multiprocessing.Process):
                     self.chunkqueue.put((i, datetime.datetime.now(), (begin, length)))
                     self.needmorequeue.get()
                     self.needmorequeue.task_done()
-                for i in range(32):
+                for i in range(4):
                     self.chunkqueue.put(None)
                 self.chunkqueue.join()
                 dataend = datetime.datetime.now()
@@ -625,12 +625,12 @@ if __name__ == "__main__":
             bigfileworkers = [ ]
             for q in bigfilesqueues:
                 print 'kicking off 2 workers for file queue'
-                for i in range(2):
+                for i in range(4):
                     w = managebigfiles(i, q, bucket_name)
                     bigfileworkers.append(w)
                     w.start()
 
-                for i in range(2):
+                for i in range(4):
                     q.put(None)
 
             print ''
@@ -646,12 +646,12 @@ if __name__ == "__main__":
             smallfileworkers = [ ]
             for q in smallfilesqueues:
                 print 'kicking off 2 workers for file queue'
-                for i in range(20):
+                for i in range(40):
                     w = managesmallfiles(i, q, bucket_name)
                     smallfileworkers.append(w)
                     w.start()
 
-                for i in range(20):
+                for i in range(40):
                     q.put(None)
 
             print ''
