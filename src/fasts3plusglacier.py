@@ -381,6 +381,8 @@ def computesha256hashtree(file):
             else:
                 break
         hashes.extend(new_hashes)
+    if not hashes:
+        return ''.join(["%02x" % ord(x) for x in hashlib.sha256('').digest() ])
     return ''.join(["%02x" % ord(x) for x in hashes[0]]).strip()
 
 
