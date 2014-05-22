@@ -189,7 +189,7 @@ class managebigfiles(multiprocessing.Process):
         conn = boto.connect_s3(host=s3endpoint, is_secure=True)
 
         print 'bucket_name', self.bucketname
-        bucket = conn.lookup(self.bucketname)
+        self.bucket = conn.lookup(self.bucketname)
         multiprocessing.Process.__init__(self)
 
 
@@ -230,7 +230,7 @@ class managebigfiles(multiprocessing.Process):
                 hashes = [ [ ] for i,(x,y) in enumerate(split_offsets(file)) ]
                 print 'lenth of hashes',len(hashes)
 
-                mp = bucket.initiate_multipart_upload('largefile/' + file, reduced_redundancy=False)
+                mp = self.bucket.initiate_multipart_upload('largefile/' + file, reduced_redundancy=False)
 
                 f = io.open(file, mode='rb', buffering=4*1024*1024)
                 workers = [ ]
@@ -295,7 +295,7 @@ class managebigfiles(multiprocessing.Process):
                 print 'hash tree', ''.join(["%02x" % ord(x) for x in linearhashes[0]]).strip()
                 hashend = datetime.datetime.now()
                 statoutput = fileobj.stat()
-                kk = bucket.get_key(completedupload.key_name)
+                kk = self.bucket.get_key(completedupload.key_name)
                 kk = kk.copy(kk.bucket.name, kk.name, { 'metadataversion': '1', 'creator': 'fasts3plusglacier',
                                                         'appversion': '1',
                                                         'ctime': myctime, 'mtime': mymtime,
@@ -329,7 +329,7 @@ class awsobjects():
         amazonlistbegintime = datetime.datetime.now()
         awscounter = 0
         print 'getting contents of bucket'
-        for key in bucket.list():
+        for key in self.bucket.list():
             awscounter += 1
             storageclass = key.storage_class
             self.amazonfiles[key.name] = { 'name': key.name, 'storageclass': storageclass,
@@ -349,7 +349,7 @@ class awsobjects():
             return False
         if self.amazonfiles[objectname]['mtime'] == None:
 #            print 'worker working on',self.amazonfiles[objectname]['key']
-            key = bucket.get_key(self.amazonfiles[objectname]['key'])
+            key = self.bucket.get_key(self.amazonfiles[objectname]['key'])
             self.amazonfiles[objectname]['mtime'] = key.get_metadata('mtime')
             self.amazonfiles[objectname]['atime'] = key.get_metadata('atime')
             self.amazonfiles[objectname]['ctime'] = key.get_metadata('ctime')
