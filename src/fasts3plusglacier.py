@@ -170,6 +170,41 @@ class Largefileblockworker(threading.Thread):
             self.computehash(*args)
             self.chunkqueue.task_done()
 
+
+
+class Largefilecopyworker(threading.Thread):
+    def __init__(self, num, mp_bucket, mp_keyname, mp_id, chunkqueue, *args, **kwargs):
+        self.mynumber = num
+
+        conn = boto.connect_s3(host=s3endpoint, is_secure=True)
+
+        bucket = conn.lookup(mp_bucket)
+        self.mp = boto.s3.multipart.MultiPartUpload(bucket)
+        self.mp.key_name = mp_keyname
+        self.mp.id = mp_id
+
+        self.mp.bucket_name = bucket_name
+        self.chunkqueue = chunkqueue
+        threading.Thread.__init__(self)
+
+
+    def dos3copy(self, uploadindex, (start, end)):
+        print 'copyfrompart',uploadindex,start,end
+        self.mp.copy_part_from_key(self.mp.bucket_name, self.mp.key_name, uploadindex, start, end)
+
+
+    def run(self):
+        while True:
+            args = self.chunkqueue.get()
+            if args is None:
+                self.chunkqueue.task_done()
+                break
+            self.dos3copy(*args)
+            self.chunkqueue.task_done()
+
+
+
+
 def split_offsets(in_file):
     size = os.path.getsize(in_file)
     return [ (i, min(chunk, size-i)) for i in range(0, size, chunk) ]
@@ -240,7 +275,7 @@ class managebigfiles(multiprocessing.Process):
                     workers.append(w)
                     w.start()
 
-                start = datetime.datetime.now()
+                uploadstart = datetime.datetime.now()
 
                 for (i, (begin, length)) in enumerate(split_offsets(file)):
                     self.chunkqueue.put((i, datetime.datetime.now(), (begin, length)))
@@ -260,12 +295,14 @@ class managebigfiles(multiprocessing.Process):
                 print 'complete upload done'
                 for worker in workers:
                     worker.join()
+                workers = None
                 finalend = datetime.datetime.now()
 
                 print 'completed location',completedupload.location
                 print 'completed key_name',completedupload.key_name
                 print 'completed version',completedupload.version_id
                 print 'completed etag',completedupload.etag
+                print 'size',fileobj.size
 
                 hashbegin = datetime.datetime.now()
 
@@ -294,24 +331,57 @@ class managebigfiles(multiprocessing.Process):
 
                 print 'hash tree', ''.join(["%02x" % ord(x) for x in linearhashes[0]]).strip()
                 hashend = datetime.datetime.now()
-                statoutput = fileobj.stat()
-                kk = self.bucket.get_key(completedupload.key_name)
-                kk = kk.copy(kk.bucket.name, kk.name, { 'metadataversion': '1', 'creator': 'fasts3plusglacier',
-                                                        'appversion': '1',
-                                                        'ctime': myctime, 'mtime': mymtime,
-                                                        'atime': myatime, 'ownername': fileobj.owner,
-                                                        'mode': oct(statoutput.st_mode & 0777), 'owneruid': statoutput.st_uid,
-                                                        'groupuid': statoutput.st_gid, 'groupname': 'notimpleemnted',
-                                                        'sha256hashtree': ''.join(["%02x" % ord(x) for x in linearhashes[0]]).strip()
-                             }, preserve_acl=True)
-                copyupend = datetime.datetime.now()
 
-                print 'file portion MB/s', (os.path.getsize(file)/(1024.0*1024.0))/((dataend-start).seconds + (dataend-start).microseconds/1e6)
-                print 'final        MB/s', (os.path.getsize(file)/(1024.0*1024.0))/((finalend-start).seconds + (finalend-start).microseconds/1e6)
-                print 'total upload time',(finalend-start).seconds + (finalend-start).microseconds/1e6
-                print 'time wasted', sum(self.timewasted)
-                print 'hash time',(hashend-hashbegin).seconds + (hashend-hashbegin).microseconds/1e6
-                print 'copy time',(copyupend-hashbegin).seconds + (copyupend-hashbegin).microseconds/1e6
+                kk = self.bucket.get_key(completedupload.key_name)
+                statoutput = fileobj.stat()
+
+                metadata = { 'metadataversion': '1', 'creator': 'fasts3plusglacier',
+                             'appversion': '1',
+                             'ctime': myctime, 'mtime': mymtime,
+                             'atime': myatime, 'ownername': fileobj.owner,
+                             'mode': oct(statoutput.st_mode & 0777), 'owneruid': statoutput.st_uid,
+                             'groupuid': statoutput.st_gid, 'groupname': 'notimpleemnted',
+                             'sha256hashtree': ''.join(["%02x" % ord(x) for x in linearhashes[0]]).strip()
+                }
+
+
+                # if file is smaller than 1GB
+                if fileobj.size <= 1*1024*1024*1024:
+                    kk = kk.copy(kk.bucket.name, kk.name, metadata=metadata, preserve_acl=True)
+                else:
+                    copychunkqueue = Queue.Queue()
+                    mp = self.bucket.initiate_multipart_upload(kk.name, metadata=metadata, reduced_redundancy=False)
+
+                    print ''
+                    print 'begin copy part from key'
+                    workers = [ ]
+                    for i in range(25):
+                        w = Largefilecopyworker(i, kk.bucket.name, kk.name, mp.id, copychunkqueue)
+                        w.setDaemon(1)
+                        workers.append(w)
+                        w.start()
+
+                    uploadcopystart = datetime.datetime.now()
+
+                    for index, (start,end) in enumerate([ (i, min(i+100*1024*1024-1, fileobj.size-1)) for i in range(0, fileobj.size, 100*1024*1024) ]):
+                        copychunkqueue.put((index+1, (start, end)))
+                    for i in range(25):
+                        copychunkqueue.put(None)
+                    copychunkqueue.join()
+                    dataend = datetime.datetime.now()
+                    print 'join waiting', dataend
+
+                    mp.complete_upload()
+
+                    copyupend = datetime.datetime.now()
+
+
+                    print 'file portion MB/s', (os.path.getsize(file)/(1024.0*1024.0))/((dataend-uploadstart).seconds + (dataend-uploadstart).microseconds/1e6)
+                    print 'final        MB/s', (os.path.getsize(file)/(1024.0*1024.0))/((finalend-uploadstart).seconds + (finalend-uploadstart).microseconds/1e6)
+                    print 'total upload time',(finalend-uploadstart).seconds + (finalend-uploadstart).microseconds/1e6
+                    print 'time wasted', sum(self.timewasted)
+                    print 'hash time',(hashend-hashbegin).seconds + (hashend-hashbegin).microseconds/1e6
+                    print 'copy time',(copyupend-hashbegin).seconds + (copyupend-hashbegin).microseconds/1e6
 
 
 
@@ -415,13 +485,13 @@ if __name__ == "__main__":
                     print 'rule prefix',rule.prefix
                     print 'rule status',rule.status
 
-    #            print 'killing lifecycle config for bucket'
-    #            bucket.delete_lifecycle_configuration()
+                    #            print 'killing lifecycle config for bucket'
+                    #            bucket.delete_lifecycle_configuration()
 
     except boto.exception.S3ResponseError, foo:
         if foo.status == 404 and foo.error_code == u'NoSuchLifecycleConfiguration':
             print 'no lifecycle config yet.  creating one.'
-            to_glacier = boto.s3.lifecycle.Transition(days=0, storage_class='GLACIER')
+            to_glacier = boto.s3.lifecycle.Transition(days=1, storage_class='GLACIER')
             rule = boto.s3.lifecycle.Rule('bigfilerule', 'largefile/', 'Enabled', transition=to_glacier)
             lifecycle = boto.s3.lifecycle.Lifecycle()
             lifecycle.append(rule)
@@ -466,8 +536,9 @@ if __name__ == "__main__":
             if i.startswith('largefile' + dirtorestore):
                 print 'found largefile',amazonfiles[i]['name']
                 print 'storage class',amazonfiles[i]['storageclass']
-                print 'ongoing restore',awsobjectlookup.get(i, 'ongoing_restore')
-                print 'expiry date',awsobjectlookup.get(i, 'expiry_date')
+                if amazonfiles[i]['storageclass'] == 'GLACIER':
+                    print 'ongoing restore',awsobjectlookup.get(i, 'ongoing_restore')
+                    print 'expiry date',awsobjectlookup.get(i, 'expiry_date')
                 if not os.path.exists('glacierrestore' + os.sep + amazonfiles[i]['name'].replace('largefile' + dirtorestore,'')):
                     if awsobjectlookup.get(i, 'storageclass') != 'GLACIER':
                         # for some reason this one isn't in glacier
@@ -477,6 +548,7 @@ if __name__ == "__main__":
 
                         print 'restoring file'
                         amazonfiles[i]['key'].get_contents_to_filename('glacierrestore' + os.sep + amazonfiles[i]['name'].replace('largefile' + dirtorestore,''))
+                        print 'setting atime/mtime (note that python2 is not microsecond accurate)'
                         os.utime('glacierrestore' + os.sep + amazonfiles[i]['name'].replace('largefile' + dirtorestore,''), (float(awsobjectlookup.get(i, 'atime')), float(awsobjectlookup.get(i, 'mtime'))))
                     else:
                         if awsobjectlookup.get(i, 'storageclass') == 'GLACIER' and awsobjectlookup.get(i, 'ongoing_restore') == True:
@@ -492,10 +564,10 @@ if __name__ == "__main__":
                                 if not os.path.exists('glacierrestore' + os.sep + amazonfiles[i]['name'].replace('largefile' + dirtorestore,'')):
                                     print 'glacierrestore' + os.sep + amazonfiles[i]['name'].replace('largefile' + dirtorestore,''),'does not exist, restoring',
                                     amazonfiles[i]['key'].get_contents_to_filename('glacierrestore' + os.sep + amazonfiles[i]['name'].replace('largefile' + dirtorestore,''))
-                                    print 'setting atime/mtime'
+                                    print 'setting atime/mtime (note that python2 is not microsecond accurate)'
                                     os.utime('glacierrestore' + os.sep + amazonfiles[i]['name'].replace('largefile' + dirtorestore,''), (float(awsobjectlookup.get(i, 'atime')), float(awsobjectlookup.get(i, 'mtime'))))
                             else:
-                                print 'firing the restore for this GLACIER file (please allow 3-5hrs)'
+                                print 'clicking restore operation for this GLACIER file (please allow 3-5hrs)'
                                 restoreit = bucket.get_key(amazonfiles[i]['name'])
                                 restoreit.restore(days=1)
                                 numbreofnewrestoresfired += 1
@@ -513,6 +585,8 @@ if __name__ == "__main__":
                 if not os.path.exists('glacierrestore' + os.sep + amazonfiles[i]['name'].replace('smallfile' + dirtorestore,'')):
                     print 'glacierrestore' + os.sep + amazonfiles[i]['name'].replace('smallfile' + dirtorestore,''),'does not exist, restoring'
                     amazonfiles[i]['key'].get_contents_to_filename('glacierrestore' + os.sep + amazonfiles[i]['name'].replace('smallfile' + dirtorestore,''))
+
+                    print 'setting atime/mtime (note that python2 is not microsecond accurate)'
                     os.utime('glacierrestore' + os.sep + amazonfiles[i]['name'].replace('smallfile' + dirtorestore,''), (float(awsobjectlookup.get(i, 'atime')), float(awsobjectlookup.get(i, 'mtime'))))
                 print ''
 
@@ -527,7 +601,9 @@ if __name__ == "__main__":
 
         file_count = 0
         bigfile_upload_count = 0
+        bigfile_discrepancies = 0
         smallfile_upload_count = 0
+        smallfile_discrepancies = 0
         dir_count = 0
         total = 0
 
@@ -544,14 +620,16 @@ if __name__ == "__main__":
                     file_count += 1
                     if i.size > 262144:
                         if amazonfiles.has_key('largefile' + i.realpath()):
-                            print i.realpath()
                             awsfile = amazonfiles['largefile' + i.realpath()]
                             if args.check_sha256:
                                 mysha = computesha256hashtree(i.realpath())
                                 if mysha == awsobjectlookup.get('largefile' + i.realpath(), 'sha256hashtree'):
-                                    print 'already uploaded, shas match'
+                                    if args.verbose:
+                                        print 'already uploaded, shas match',i.realpath()
                                 else:
-                                    print 'already uploaded, but shas do not match'
+                                    bigfile_discrepancies += 1
+                                    if args.verbose:
+                                        print 'already uploaded, but shas do not match',i.realpath()
                                     if args.backup:
                                         bigfilesqueue.put(i)
                                         bigfile_upload_count += 1
@@ -561,29 +639,35 @@ if __name__ == "__main__":
                                 mymtime = "{0:d}.{1:09d}".format(result.st_mtim.tv_sec, result.st_mtim.tv_nsec)
 
                                 if awsobjectlookup.get('largefile' + i.realpath(), 'mtime') == mymtime:
-                                    print 'already uploaded, mtimes match (%s)' % awsobjectlookup.get('largefile' + i.realpath(), 'mtime')
+                                    if args.verbose:
+                                        print 'already uploaded, mtimes match (%s)' % awsobjectlookup.get('largefile' + i.realpath(), 'mtime'),i.realpath()
                                 else:
-                                    print 'already uploaded, mtimes do not match'
+                                    bigfile_discrepancies += 1
+                                    if args.verbose:
+                                        print 'already uploaded, mtimes do not match',i.realpath()
                                     if args.backup:
                                         bigfilesqueue.put(i)
                                         bigfile_upload_count += 1
                         else:
+                            bigfile_discrepancies += 1
                             if args.backup:
                                 bigfilesqueue.put(i)
                                 bigfile_upload_count += 1
                             else:
                                 if args.verbose:
-                                    print i.realpath(),'compare only, not uploading'
+                                    print 'does not exist in s3',i.realpath()
                     else:
                         if amazonfiles.has_key('smallfile' + i.realpath()):
-                            print i.realpath()
                             awsfile = amazonfiles['smallfile' + i.realpath()]
                             if args.check_sha256:
                                 mysha = computesha256hashtree(i.realpath())
                                 if mysha == awsobjectlookup.get('smallfile' + i.realpath(), 'sha256hashtree'):
-                                    print 'already uploaded, shas match'
+                                    if args.verbose:
+                                        print 'already uploaded, shas match',i.realpath()
                                 else:
-                                    print 'already uploaded, but shas do not match'
+                                    smallfile_discrepancies += 1
+                                    if args.verbose:
+                                        print 'already uploaded, but shas do not match',i.realpath()
                                     if args.backup:
                                         smallfilesqueue.put(i)
                                         smallfile_upload_count += 1
@@ -593,38 +677,47 @@ if __name__ == "__main__":
                                 mymtime = "{0:d}.{1:09d}".format(result.st_mtim.tv_sec, result.st_mtim.tv_nsec)
 
                                 if awsobjectlookup.get('smallfile' + i.realpath(), 'mtime') == mymtime:
-                                    print 'already uploaded, mtimes match (%s)' % awsobjectlookup.get('smallfile' + i.realpath(), 'mtime')
+                                    if args.verbose:
+                                        print 'already uploaded, mtimes match (%s)' % awsobjectlookup.get('smallfile' + i.realpath(), 'mtime'),i.realpath()
                                 else:
-                                    print 'already uploaded, mtimes do not match'
+                                    smallfile_discrepancies += 1
+                                    if args.verbose:
+                                        print 'already uploaded, mtimes do not match',i.realpath()
                                     if args.backup:
                                         smallfilesqueue.put(i)
                                         smallfile_upload_count += 1
                         else:
+                            smallfile_discrepancies += 1
                             if args.backup:
                                 smallfilesqueue.put(i)
                                 smallfile_upload_count += 1
                             else:
                                 if args.verbose:
-                                    print i.realpath(),'compare only, not uploading'
+                                    print 'does not exist in s3',i.realpath()
                 elif i.isdir():
                     dir_count += 1
                 else:
+                    # ignore character, block, and sym links for now
                     pass
                 total += 1
             print ''
 
-        print "Total number of directories scanned == {0}".format(dir_count)
-        print "Total number of files scanned == {0}".format(file_count)
-        print "Total number of big files to upload == {0}".format(bigfile_upload_count)
-        print "Total number of small files to upload == {0}".format(smallfile_upload_count)
-    #    print 'amazon bucket list',awscounter,'in',(amazonlistendtime-amazonlistbegintime).seconds + (amazonlistendtime-amazonlistbegintime).microseconds/1e6,'seconds'
+        print 'Total number of directories scanned: ',dir_count
+        print 'Total number of files scanned:',file_count
+        print ''
+        print 'Total number of small file discrepancies (local vs S3):',smallfile_discrepancies
+        print 'Total number of large file discrepancies (local vs S3):',bigfile_discrepancies
+        if args.backup:
+            print 'Total number of big files to upload:',bigfile_upload_count
+            print 'Total number of small files to upload:',smallfile_upload_count
+
         print ''
 
         if bigfile_upload_count > 0:
             bigfilebegintime = datetime.datetime.now()
             bigfileworkers = [ ]
             for q in bigfilesqueues:
-                print 'kicking off 2 workers for file queue'
+                print 'kicking off 4 workers for file queue'
                 for i in range(4):
                     w = managebigfiles(i, q, bucket_name)
                     bigfileworkers.append(w)
@@ -645,7 +738,7 @@ if __name__ == "__main__":
             smallfilebegintime = datetime.datetime.now()
             smallfileworkers = [ ]
             for q in smallfilesqueues:
-                print 'kicking off 2 workers for file queue'
+                print 'kicking off 40 workers for file queue'
                 for i in range(40):
                     w = managesmallfiles(i, q, bucket_name)
                     smallfileworkers.append(w)
