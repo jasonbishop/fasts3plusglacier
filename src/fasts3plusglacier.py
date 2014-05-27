@@ -77,7 +77,6 @@ class managesmallfiles(multiprocessing.Process):
 
         conn = boto.connect_s3(host=s3endpoint, is_secure=True)
 
-        print 'bucket_name', self.bucketname
         self.bucket = conn.lookup(self.bucketname)
         multiprocessing.Process.__init__(self)
 
@@ -223,7 +222,6 @@ class managebigfiles(multiprocessing.Process):
 
         conn = boto.connect_s3(host=s3endpoint, is_secure=True)
 
-        print 'bucket_name', self.bucketname
         self.bucket = conn.lookup(self.bucketname)
         multiprocessing.Process.__init__(self)
 
@@ -713,9 +711,9 @@ if __name__ == "__main__":
 
         print ''
 
+        bigfileworkers = [ ]
         if bigfile_upload_count > 0:
             bigfilebegintime = datetime.datetime.now()
-            bigfileworkers = [ ]
             for q in bigfilesqueues:
                 print 'kicking off 4 workers for file queue'
                 for i in range(4):
@@ -727,10 +725,6 @@ if __name__ == "__main__":
                     q.put(None)
 
             print ''
-            for worker in bigfileworkers:
-                worker.join()
-            bigfileendtime = datetime.datetime.now()
-            print 'largefileupload took',(bigfileendtime-bigfilebegintime).seconds + (bigfileendtime-bigfilebegintime).microseconds/1e6
 
 
 
@@ -752,3 +746,9 @@ if __name__ == "__main__":
                 worker.join()
             smallfileendtime = datetime.datetime.now()
             print 'smallfileupload took',(smallfileendtime-smallfilebegintime).seconds + (smallfileendtime-smallfilebegintime).microseconds/1e6
+
+        if bigfile_upload_count > 0:
+            for worker in bigfileworkers:
+                worker.join()
+            bigfileendtime = datetime.datetime.now()
+            print 'largefileupload took',(bigfileendtime-bigfilebegintime).seconds + (bigfileendtime-bigfilebegintime).microseconds/1e6
