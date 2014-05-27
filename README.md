@@ -11,8 +11,8 @@ This utility is targeted towards Stanford's research computing community require
 
 This sript uses S3 and lifecycle management to move things to and from Glacier.  As such:
 
-* small files are cheaper to keep in S3 than glacier
-* large files are cheaper to keep in Glacier than S3
+* small files are cheaper to keep in S3 than glacier (<= 128k)
+* large files are cheaper to keep in Glacier than S3 (> 128k)
 
 
 ## upload strategy
@@ -31,10 +31,12 @@ Theory of operation:
 Use a single disk stream to fill buffers. Once a buffer is full, the
 multipart upload is kicked off and the disk read is picked up by another
 buffer. As long there is an available buffer then the disk is read
-continuously. Technically the disk is ready by many threads, but some care
-is taken to make sure only one thread is reading at any one time.
+continuously. Technically the disk is read by many threads, but some care
+is taken to make sure only one thread is reading at any one time.  This
+has additional advantages for parallel filesystems such as GPFS and Lustre, where
+opening a file and reading a data block is an expensive operation.
 
-The end result is the disk is read sequentially, the network in parallel, and the two are largely asynchronous to each other.
+The end result is the disk is read sequentially while the network is parallel.
 
 
 ## Modes of operation
