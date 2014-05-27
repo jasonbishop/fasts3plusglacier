@@ -620,7 +620,7 @@ if __name__ == "__main__":
             for i in d.walk():
                 if i.isfile():
                     file_count += 1
-                    if i.size > 262144:
+                    if i.size > 131072:
                         if amazonfiles.has_key('largefile' + i.realpath()):
                             awsfile = amazonfiles['largefile' + i.realpath()]
                             if args.check_sha256:
