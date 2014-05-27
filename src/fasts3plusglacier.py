@@ -262,12 +262,13 @@ class managebigfiles(multiprocessing.Process):
             else:
                 hashes = [ [ ] for i,(x,y) in enumerate(split_offsets(file)) ]
                 print 'lenth of hashes',len(hashes)
+                print 'kicking off workers for',args.num_largefile_buffers,'buffers'
 
                 mp = self.bucket.initiate_multipart_upload('largefile/' + file, reduced_redundancy=False)
 
                 f = io.open(file, mode='rb', buffering=4*1024*1024)
                 workers = [ ]
-                for i in range(4):
+                for i in range(args.num_largefile_buffers):
                     w = Largefileblockworker(i, bucket_name, f, mp.key_name, mp.id, self.chunkqueue, self.needmorequeue, self.timewasted, self.result, hashes)
                     w.setDaemon(1)
                     workers.append(w)
@@ -279,7 +280,7 @@ class managebigfiles(multiprocessing.Process):
                     self.chunkqueue.put((i, datetime.datetime.now(), (begin, length)))
                     self.needmorequeue.get()
                     self.needmorequeue.task_done()
-                for i in range(4):
+                for i in range(args.num_largefile_buffers):
                     self.chunkqueue.put(None)
                 self.chunkqueue.join()
                 dataend = datetime.datetime.now()
@@ -463,6 +464,9 @@ if __name__ == "__main__":
     parser.add_argument('--check-sha256', help='when comparing, use sha hash instead of mtime', default=False, action='store_true')
     parser.add_argument('--bucketname', help='which bucket to use', required=True, action='store')
     parser.add_argument('--verbose', help='verbose output', default=False, action='store_true')
+    parser.add_argument('--num-smallfile-workers', help='number of threads to upload small files', default='20', type=int, action='store')
+    parser.add_argument('--num-largefile-workers', help='number of threads to upload large files', default='4', type=int, action='store')
+    parser.add_argument('--num-largefile-buffers', help='number of buffers used by largefile threads.  each buffer is 40MB.', default='8', type=int, action='store')
     args = parser.parse_args()
     print (args)
 
@@ -495,7 +499,7 @@ if __name__ == "__main__":
             lifecycle.append(rule)
             bucket.configure_lifecycle(lifecycle)
         else:
-            raise foo
+            raise
 
 
     awsobjectlookup = awsobjects(bucket_name)
@@ -715,13 +719,13 @@ if __name__ == "__main__":
         if bigfile_upload_count > 0:
             bigfilebegintime = datetime.datetime.now()
             for q in bigfilesqueues:
-                print 'kicking off 4 workers for file queue'
-                for i in range(4):
+                print 'kicking off',args.num_largefile_workers,'workers for file queue'
+                for i in range(args.num_largefile_workers):
                     w = managebigfiles(i, q, bucket_name)
                     bigfileworkers.append(w)
                     w.start()
 
-                for i in range(4):
+                for i in range(args.num_largefile_workers):
                     q.put(None)
 
             print ''
@@ -732,13 +736,13 @@ if __name__ == "__main__":
             smallfilebegintime = datetime.datetime.now()
             smallfileworkers = [ ]
             for q in smallfilesqueues:
-                print 'kicking off 40 workers for file queue'
-                for i in range(40):
+                print 'kicking off',args.num_smallfile_workers,'workers for file queue'
+                for i in range(args.num_smallfile_workers):
                     w = managesmallfiles(i, q, bucket_name)
                     smallfileworkers.append(w)
                     w.start()
 
-                for i in range(40):
+                for i in range(args.num_smallfile_workers):
                     q.put(None)
 
             print ''
