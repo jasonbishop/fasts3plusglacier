@@ -591,6 +591,20 @@ if __name__ == "__main__":
                     print 'setting atime/mtime (note that python2 is not microsecond accurate)'
                     os.utime('glacierrestore' + os.sep + amazonfiles[i]['name'].replace('smallfile' + dirtorestore,''), (float(awsobjectlookup.get(i, 'atime')), float(awsobjectlookup.get(i, 'mtime'))))
                 print ''
+            if i.startswith('symlinks' + dirtorestore):
+                print 'found symlink',amazonfiles[i]['name']
+                print 'storage class',amazonfiles[i]['storageclass']
+
+                if not os.path.exists('glacierrestore' + os.sep + os.path.dirname(amazonfiles[i]['name'].replace('symlinks' + dirtorestore,''))):
+                    os.makedirs('glacierrestore' + os.sep + os.path.dirname(amazonfiles[i]['name'].replace('symlinks' + dirtorestore,'')))
+
+                if not os.path.exists('glacierrestore' + os.sep + amazonfiles[i]['name'].replace('symlinks' + dirtorestore,'')):
+                    print 'glacierrestore' + os.sep + amazonfiles[i]['name'].replace('symlinks' + dirtorestore,''),'does not exist, restoring symlink'
+                    symlinkcontents = amazonfiles[i]['key'].get_contents_as_string()
+                    print 'symlinkcontents',symlinkcontents
+                    print '88888888888','glacierrestore' + os.sep + amazonfiles[i]['name'].replace('symlinks' + dirtorestore,'')
+                    os.symlink(symlinkcontents, 'glacierrestore' + os.sep + amazonfiles[i]['name'].replace('symlinks' + dirtorestore,''))
+                print ''
 
         print ''
         print 'number of files currently being restored from glacier to S3:',numberofrestoreswearewaitingfor
@@ -600,12 +614,16 @@ if __name__ == "__main__":
     if not args.restore:
         smallfilesqueues = [ ]
         bigfilesqueues = [ ]
+        symlinksqueue = multiprocessing.Queue()
+
 
         file_count = 0
         bigfile_upload_count = 0
         bigfile_discrepancies = 0
         smallfile_upload_count = 0
         smallfile_discrepancies = 0
+        symlink_upload_count = 0
+        symlink_discrepancies = 0
         dir_count = 0
         total = 0
 
@@ -618,7 +636,10 @@ if __name__ == "__main__":
             print 'scanning dir',dir
             d = path(dir)
             for i in d.walk():
-                if i.isfile():
+                if i.isfile() and not i.islink():
+                    print i.name,'is a file'
+                    print i.realpath(),'is a file'
+                    print ''
                     file_count += 1
                     if i.size > 131072:
                         if amazonfiles.has_key('largefile' + i.realpath()):
@@ -696,6 +717,15 @@ if __name__ == "__main__":
                             else:
                                 if args.verbose:
                                     print 'does not exist in s3',i.realpath()
+                elif i.islink():
+                    # save sym links in their own area
+                    symlink_discrepancies += 1
+                    if args.backup:
+                        symlinksqueue.put(i)
+                        symlink_upload_count += 1
+                    else:
+                        if args.verbose:
+                            print 'does not exist in S3',i.__str__()
                 elif i.isdir():
                     dir_count += 1
                 else:
@@ -709,9 +739,11 @@ if __name__ == "__main__":
         print ''
         print 'Total number of small file discrepancies (local vs S3):',smallfile_discrepancies
         print 'Total number of large file discrepancies (local vs S3):',bigfile_discrepancies
+        print 'Total number of symlink    discrepancies (local vs S3):',symlink_discrepancies
         if args.backup:
-            print 'Total number of big files to upload:',bigfile_upload_count
+            print 'Total number of big   files to upload:',bigfile_upload_count
             print 'Total number of small files to upload:',smallfile_upload_count
+            print 'Total number of symlinks    to upload:',symlink_upload_count
 
         print ''
 
@@ -750,6 +782,43 @@ if __name__ == "__main__":
                 worker.join()
             smallfileendtime = datetime.datetime.now()
             print 'smallfileupload took',(smallfileendtime-smallfilebegintime).seconds + (smallfileendtime-smallfilebegintime).microseconds/1e6
+
+        if symlink_upload_count > 0:
+            symlinksqueue.put(None)
+            # sym links
+            while True:
+                linkobj = symlinksqueue.get()
+                if linkobj == None:
+                    break
+
+                statoutput = linkobj.lstat()
+
+                result = ffi.new("struct stat *")
+                p = C.lstat(str(linkobj.__str__()), result)
+                mymtime = "{0:d}.{1:09d}".format(result.st_mtim.tv_sec, result.st_mtim.tv_nsec)
+                myctime = "{0:d}.{1:09d}".format(result.st_ctim.tv_sec, result.st_ctim.tv_nsec)
+                myatime = "{0:d}.{1:09d}".format(result.st_atim.tv_sec, result.st_atim.tv_nsec)
+
+                print '3333333','symlinks' + linkobj.__str__()
+                print '4444444',linkobj.readlink()
+                print ''
+                symlinkbucket = conn.get_bucket(bucket_name)
+                newobject = symlinkbucket.new_key('symlinks' + linkobj.__str__())
+                newobject.set_metadata('metadataversion', '1')
+                newobject.set_metadata('creator', 'fasts3plusglacier')
+                newobject.set_metadata('appversion', '1')
+                newobject.set_metadata('ctime', myctime)
+                newobject.set_metadata('mtime', mymtime)
+                newobject.set_metadata('atime', myatime)
+                newobject.set_metadata('ownername', linkobj.owner)
+                newobject.set_metadata('mode', oct(statoutput.st_mode & 0777))
+                newobject.set_metadata('owneruid', statoutput.st_uid)
+                newobject.set_metadata('groupuid', statoutput.st_gid)
+                newobject.set_metadata('groupname', 'notimplemented')
+                newobject.set_metadata('sha256hashtree', ''.join(["%02x" % ord(x) for x in hashlib.sha256(linkobj.readlink()).digest()]))
+                newobject.set_contents_from_string(linkobj.readlink(), reduced_redundancy=False, encrypt_key=False)
+
+
 
         if bigfile_upload_count > 0:
             for worker in bigfileworkers:
