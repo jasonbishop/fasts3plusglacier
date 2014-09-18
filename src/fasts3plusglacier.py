@@ -84,26 +84,39 @@ class managesmallfiles(multiprocessing.Process):
     def dos3upload(self, fileobj):
         statoutput = fileobj.stat()
 
-        result = ffi.new("struct stat *")
-        p = C.lstat(str(fileobj.realpath()), result)
-        mymtime = "{0:d}.{1:09d}".format(result.st_mtim.tv_sec, result.st_mtim.tv_nsec)
-        myctime = "{0:d}.{1:09d}".format(result.st_ctim.tv_sec, result.st_ctim.tv_nsec)
-        myatime = "{0:d}.{1:09d}".format(result.st_atim.tv_sec, result.st_atim.tv_nsec)
+        try:
+            result = ffi.new("struct stat *")
+            p = C.lstat(str(fileobj.realpath()), result)
+            mymtime = "{0:d}.{1:09d}".format(result.st_mtim.tv_sec, result.st_mtim.tv_nsec)
+            myctime = "{0:d}.{1:09d}".format(result.st_ctim.tv_sec, result.st_ctim.tv_nsec)
+            myatime = "{0:d}.{1:09d}".format(result.st_atim.tv_sec, result.st_atim.tv_nsec)
 
-        newobject = self.bucket.new_key('smallfile/' + fileobj.realpath())
-        newobject.set_metadata('metadataversion', '1')
-        newobject.set_metadata('creator', 'fasts3plusglacier')
-        newobject.set_metadata('appversion', '1')
-        newobject.set_metadata('ctime', myctime)
-        newobject.set_metadata('mtime', mymtime)
-        newobject.set_metadata('atime', myatime)
-        newobject.set_metadata('ownername', fileobj.owner)
-        newobject.set_metadata('mode', oct(statoutput.st_mode & 0777))
-        newobject.set_metadata('owneruid', statoutput.st_uid)
-        newobject.set_metadata('groupuid', statoutput.st_gid)
-        newobject.set_metadata('groupname', 'notimplemented')
-        newobject.set_metadata('sha256hashtree', computesha256hashtree(fileobj.realpath()))
-        newobject.set_contents_from_filename(fileobj.realpath(), reduced_redundancy=False)
+            newobject = self.bucket.new_key('smallfile/' + fileobj.realpath())
+            newobject.set_metadata('metadataversion', '1')
+            newobject.set_metadata('creator', 'fasts3plusglacier')
+            newobject.set_metadata('appversion', '1')
+            newobject.set_metadata('ctime', myctime)
+            newobject.set_metadata('mtime', mymtime)
+            newobject.set_metadata('atime', myatime)
+            newobject.set_metadata('ownername', fileobj.owner)
+            newobject.set_metadata('mode', oct(statoutput.st_mode & 0777))
+            newobject.set_metadata('owneruid', statoutput.st_uid)
+            newobject.set_metadata('groupuid', statoutput.st_gid)
+            newobject.set_metadata('groupname', 'notimplemented')
+            newobject.set_metadata('sha256hashtree', computesha256hashtree(fileobj.realpath()))
+            newobject.set_contents_from_filename(fileobj.realpath(), reduced_redundancy=False)
+
+            if fileobj.size != os.path.getsize(fileobj.realpath()):
+                print fileobj.realpath(),'file size changed while we were uploading'
+                faileduploadslist.append(fileobj.realpath())
+
+
+        except IOError as err:
+            if err.errno == 13:
+                print 'got permissions error'
+                faileduploadslist.append(fileobj.realpath())
+            else:
+                raise
 
     def run(self):
         while True:
@@ -287,6 +300,10 @@ class managebigfiles(multiprocessing.Process):
                 print 'join waiting', dataend
                 f.close()
 
+
+                if fileobj.size != os.path.getsize(fileobj.realpath()):
+                    print fileobj.realpath(),'file size changed while we were uploading'
+                    faileduploadslist.append(fileobj.realpath())
 
                 print ''
                 print 'firing complete upload'
@@ -474,6 +491,9 @@ if __name__ == "__main__":
 
     bucket_name = args.bucketname
     bucket = conn.get_bucket(bucket_name)
+
+
+    faileduploadslist = [ ]
 
     try:
         current = bucket.get_lifecycle_config()
@@ -818,6 +838,9 @@ if __name__ == "__main__":
                 newobject.set_metadata('sha256hashtree', ''.join(["%02x" % ord(x) for x in hashlib.sha256(linkobj.readlink()).digest()]))
                 newobject.set_contents_from_string(linkobj.readlink(), reduced_redundancy=False, encrypt_key=False)
 
+    if args.backup:
+        for i in faileduploadslist:
+            print 'failed upload',i
 
 
         if bigfile_upload_count > 0:
@@ -825,3 +848,4 @@ if __name__ == "__main__":
                 worker.join()
             bigfileendtime = datetime.datetime.now()
             print 'largefileupload took',(bigfileendtime-bigfilebegintime).seconds + (bigfileendtime-bigfilebegintime).microseconds/1e6
+
